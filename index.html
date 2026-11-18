@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mapa de Cajá – Caldas Brandão (PB)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  html,body{height:100%;margin:0;font-family:system-ui,sans-serif}
+  #map{height:100%}
+  #bar{position:absolute;z-index:1000;top:10px;left:10px;right:10px;max-width:460px;background:#fff;border-radius:12px;box-shadow:0 2px 10px #0004;padding:8px}
+  #busca{width:100%;box-sizing:border-box;padding:10px;border:1px solid #ccc;border-radius:8px;font-size:16px}
+  #chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .chip{border:1px solid #bbb;background:#f5f5f5;border-radius:16px;padding:5px 10px;font-size:13px;cursor:pointer}
+  .chip.on{background:#1a73e8;color:#fff;border-color:#1a73e8}
+  #status{font-size:12px;color:#555;margin-top:6px}
+  .pin{font-size:22px;line-height:26px;text-align:center;text-shadow:0 0 3px #fff,0 0 3px #fff}
+</style>
+</head>
+<body>
+<div id="bar">
+  <input id="busca" placeholder="Pesquisar lugar ou rua…" autocomplete="off">
+  <div id="chips"></div>
+  <div id="status">Carregando dados do OpenStreetMap…</div>
+</div>
+<div id="map"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+const CENTRO = [-7.1017, -35.3347]; // Caldas Brandão (ajuste se precisar)
+const CATS = {
+  igreja:  {nome:'Igreja',  emoji:'⛪'},
+  praca:   {nome:'Praça',   emoji:'🌳'},
+  escola:  {nome:'Escolas', emoji:'🏫'},
+  posto:   {nome:'Posto',   emoji:'⛽'},
+  tapioca: {nome:'Tapioca', emoji:'🫓'},
+  comercio:{nome:'Comércio',emoji:'🏪'}
+};
+const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+
+const map = L.map('map',{zoomControl:true}).setView(CENTRO,16);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  maxZoom:19, attribution:'© OpenStreetMap contributors'}).addTo(map);
+
+const gBuild = L.layerGroup().addTo(map);
+const gStreet = L.layerGroup().addTo(map);
+const gPois = L.layerGroup().addTo(map);
+const pois = [], streets = [];
+let ativo = null;
+
+function cat(t){
+  const n = t.name||'';
+  if (t.amenity==='place_of_worship') return 'igreja';
+  if (['school','kindergarten','college'].includes(t.amenity)) return 'escola';
+  if (t.amenity==='fuel') return 'posto';
+  if (/tapioca/i.test(n) || /tapioca/i.test(t.cuisine||'')) return 'tapioca';
+  if (t.leisure==='park' || t.place==='square' || /pra[çc]a/i.test(n)) return 'praca';
+  if (t.amenity || t.shop) return 'comercio';
+  return null;
+}
+const esp = {motorway:6,trunk:6,primary:6,secondary:5,tertiary:4,residential:3,unclassified:3,service:2,track:2,footway:1.5,path:1.5};
+const corVia = h => ['trunk','primary','motorway'].includes(h)?'#e67e22':h==='secondary'?'#f1c40f':'#888';
+
+function popup(t,c){
+  const end = [t['addr:street'],t['addr:housenumber'],t['addr:suburb']].filter(Boolean).join(', ');
+  const linhas = [
+    `<b>${t.name||'(sem nome)'}</b>`,
+    `${CATS[c].emoji} ${t.amenity||t.shop||t.leisure||CATS[c].nome}`,
+    end && `📍 ${end}`,
+    t.opening_hours && `🕒 ${t.opening_hours}`,
+    t.phone && `📞 ${t.phone}`
+  ].filter(Boolean);
+  return linhas.join('<br>');
+}
+
+function addPoi(t,lat,lon){
+  const c = cat(t); if(!c) return;
+  const m = L.marker([lat,lon],{icon:L.divIcon({className:'',html:`<div class="pin">${CATS[c].emoji}</div>`,iconSize:[26,26],iconAnchor:[13,13]})});
+  m.bindPopup(popup(t,c));
+  if(t.name) m.bindTooltip(t.name,{direction:'top'});
+  pois.push({m,c,nome:t.name||'',n:norm(t.name)});
+}
+
+async function carregar(){
+  const [lat,lon] = CENTRO;
+  const q = `[out:json][timeout:60];(
+    way["highway"](around:1800,${lat},${lon});
+    way["building"](around:900,${lat},${lon});
+    nwr["amenity"](around:1800,${lat},${lon});
+    nwr["shop"](around:1800,${lat},${lon});
+    nwr["leisure"="park"](around:1800,${lat},${lon});
+    nwr["place"="square"](around:1800,${lat},${lon});
+    nwr["name"~"tapioca|pra[cç]a",i](around:1800,${lat},${lon});
+  );out geom center;`;
+  try{
+    const r = await fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:'data='+encodeURIComponent(q)});
+    const d = await r.json();
+    const vistos = new Set();
+    d.elements.forEach(e=>{
+      const t = e.tags||{};
+      if(e.type==='way' && t.highway && e.geometry){
+        const ll = e.geometry.map(p=>[p.lat,p.lon]);
+        const l = L.polyline(ll,{color:corVia(t.highway),weight:esp[t.highway]||2,opacity:.9}).addTo(gStreet);
+        if(t.name){ l.bindPopup('🛣️ <b>'+t.name+'</b>'); streets.push({n:norm(t.name),nome:t.name,l}); }
+        return;
+      }
+      if(e.type==='way' && t.building && e.geometry && !cat(t)){
+        L.polygon(e.geometry.map(p=>[p.lat,p.lon]),{color:'#999',weight:1,fillColor:'#bbb',fillOpacity:.6,interactive:false}).addTo(gBuild);
+        return;
+      }
+      const c = e.center || e;
+      if(c.lat===undefined) return;
+      const k = e.type+e.id; if(vistos.has(k)) return; vistos.add(k);
+      if(e.type==='way' && t.building && e.geometry)
+        L.polygon(e.geometry.map(p=>[p.lat,p.lon]),{color:'#999',weight:1,fillColor:'#bbb',fillOpacity:.6,interactive:false}).addTo(gBuild);
+      addPoi(t,c.lat,c.lon);
+    });
+    desenhar();
+    document.getElementById('status').textContent =
+      `${pois.length} lugares e ${streets.length} ruas carregados.`;
+  }catch(err){
+    document.getElementById('status').textContent = 'Erro ao carregar dados: '+err.message+' (tente recarregar)';
+  }
+}
+
+function desenhar(){
+  gPois.clearLayers();
+  pois.forEach(p=>{ if(!ativo || p.c===ativo) gPois.addLayer(p.m); });
+}
+
+const chips = document.getElementById('chips');
+Object.entries(CATS).forEach(([k,v])=>{
+  const b = document.createElement('button');
+  b.className='chip'; b.textContent=v.emoji+' '+v.nome;
+  b.onclick=()=>{
+    ativo = ativo===k ? null : k;
+    [...chips.children].forEach(x=>x.classList.remove('on'));
+    if(ativo) b.classList.add('on');
+    desenhar();
+    const vis = pois.filter(p=>p.c===ativo).map(p=>p.m.getLatLng());
+    if(vis.length) map.fitBounds(L.latLngBounds(vis).pad(.3),{maxZoom:18});
+  };
+  chips.appendChild(b);
+});
+
+let ultimo = 0;
+document.getElementById('busca').addEventListener('keydown', async ev=>{
+  if(ev.key!=='Enter') return;
+  const txt = ev.target.value.trim(); if(!txt) return;
+  const n = norm(txt);
+  const p = pois.find(x=>x.n.includes(n));
+  if(p){ ativo=null; [...chips.children].forEach(x=>x.classList.remove('on')); desenhar(); map.flyTo(p.m.getLatLng(),18); p.m.openPopup(); return; }
+  const s = streets.filter(x=>x.n.includes(n));
+  if(s.length){
+    const b = L.latLngBounds(s.flatMap(x=>x.l.getLatLngs()));
+    map.flyToBounds(b.pad(.3)); s[0].l.openPopup(b.getCenter()); return;
+  }
+  if(Date.now()-ultimo<1100) return; ultimo = Date.now();
+  const st = document.getElementById('status'); st.textContent='Buscando no Nominatim…';
+  try{
+    const u = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(txt+', Caldas Brandão, Paraíba')}`;
+    const r = (await (await fetch(u)).json())[0];
+    if(r){ map.flyTo([+r.lat,+r.lon],18); L.popup().setLatLng([+r.lat,+r.lon]).setContent(r.display_name).openOn(map); st.textContent='Resultado encontrado.'; }
+    else st.textContent='Nada encontrado para “'+txt+'”.';
+  }catch(e){ st.textContent='Erro na busca.'; }
+});
+
+carregar();
+</script>
+</body>
+</html>
